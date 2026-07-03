@@ -46,6 +46,51 @@ def _render_ai_analysis(ai_analysis: Any, channel: str) -> str:
         return ""
 
 
+def _save_notification_preview(
+    channel: str,
+    report_type: str,
+    batches: list,
+    get_time_func: Optional[Callable] = None,
+) -> Optional[Path]:
+    """保存实际发送给通知渠道的 Markdown 正文，便于排查和复盘。"""
+    if not batches:
+        return None
+
+    try:
+        now = get_time_func() if get_time_func else datetime.now()
+        date_folder = now.strftime("%Y-%m-%d")
+        time_name = now.strftime("%H-%M-%S")
+
+        output_root = Path("output") / "notifications"
+        history_dir = output_root / channel / date_folder
+        latest_dir = output_root / "latest"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        latest_dir.mkdir(parents=True, exist_ok=True)
+
+        content_parts = []
+        for index, batch in enumerate(batches, 1):
+            if len(batches) > 1:
+                content_parts.append(f"<!-- batch {index}/{len(batches)} -->\n")
+            content_parts.append(batch.rstrip())
+
+        content = "\n\n".join(content_parts).rstrip() + "\n"
+        header = (
+            f"<!-- channel: {channel}; report_type: {report_type}; "
+            f"batches: {len(batches)}; generated_at: {now.isoformat()} -->\n\n"
+        )
+
+        history_file = history_dir / f"{time_name}_{report_type}.md"
+        latest_file = latest_dir / f"{channel}.md"
+        history_file.write_text(header + content, encoding="utf-8")
+        latest_file.write_text(header + content, encoding="utf-8")
+        print(f"{channel} 推送正文已保存: {history_file}")
+        print(f"{channel} 最新推送正文已更新: {latest_file}")
+        return history_file
+    except Exception as exc:
+        print(f"{channel} 推送正文保存失败: {exc}")
+        return None
+
+
 # === SMTP 邮件配置 ===
 SMTP_CONFIGS = {
     # Gmail（使用 STARTTLS）
@@ -156,6 +201,7 @@ def send_to_feishu(
 
     # 统一添加批次头部（已预留空间，不会超限）
     batches = add_batch_headers(batches, "feishu", batch_size)
+    _save_notification_preview("feishu", report_type, batches, get_time_func)
 
     print(f"{log_prefix}消息分为 {len(batches)} 批次发送 [{report_type}]")
 

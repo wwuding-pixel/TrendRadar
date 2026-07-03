@@ -35,7 +35,7 @@ on:
     #   "15 * * * *"     → 每小时第15分钟 / minute 15 every hour
     #   "30 0-14 * * *"  → 北京时间 8:00-22:00 每小时第30分钟 / Beijing 8am-10pm
     #
-    - cron: "33 * * * *"
+    - cron: "33 */3 * * *"
 
   workflow_dispatch:
 
@@ -168,3 +168,21 @@ jobs:
           S3_REGION: ${{ secrets.S3_REGION }}
           GITHUB_ACTIONS: true
         run: uv run python -m trendradar
+
+      - name: Upload Feishu preview to IMA
+        if: always()
+        env:
+          IMA_CLIENT_ID: ${{ secrets.IMA_CLIENT_ID }}
+          IMA_API_KEY: ${{ secrets.IMA_API_KEY }}
+          IMA_KNOWLEDGE_BASE_ID: ${{ secrets.IMA_KNOWLEDGE_BASE_ID }}
+          IMA_FOLDER_ID: ${{ secrets.IMA_FOLDER_ID }}
+          IMA_TITLE_PREFIX: TrendRadar
+        run: uv run python scripts/upload_ima.py --file output/notifications/latest/feishu.md
+
+      - name: Upload notification previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notification-previews
+          path: output/notifications/
+          if-no-files-found: ignore

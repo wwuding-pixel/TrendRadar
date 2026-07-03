@@ -30,6 +30,12 @@ from trendradar.ai import AIAnalyzer, AIAnalysisResult
 from trendradar.core.scheduler import ResolvedSchedule
 
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
+
 def _parse_version(version_str: str) -> Tuple[int, int, int]:
     """解析版本号字符串为元组"""
     try:
@@ -997,6 +1003,12 @@ class NewsAnalyzer:
                 print("未配置任何通知渠道，跳过通知发送")
                 return False
 
+            result_summary = ", ".join(
+                f"{channel}={'成功' if ok else '失败'}"
+                for channel, ok in results.items()
+            )
+            print(f"[推送] 渠道发送结果: {result_summary}")
+
             # 记录推送成功
             if any(results.values()):
                 if schedule.once_push and schedule.period_key:
@@ -1004,7 +1016,7 @@ class NewsAnalyzer:
                     date_str = self.ctx.format_date()
                     scheduler.record_execution(schedule.period_key, "push", date_str)
 
-            return True
+            return any(results.values())
 
         elif cfg["ENABLE_NOTIFICATION"] and not has_notification:
             print("⚠️ 警告：通知功能已启用但未配置任何通知渠道，将跳过通知发送")
