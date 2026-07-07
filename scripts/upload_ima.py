@@ -9,12 +9,22 @@ import hmac
 import json
 import mimetypes
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import quote
 
 import requests
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from trendradar.utils.delivery_audit import (
+    append_delivery_event,
+    update_delivery_report,
+)
 
 
 IMA_API_BASE = "https://ima.qq.com/openapi/wiki/v1"
@@ -193,12 +203,42 @@ def upload_file(
 ) -> None:
     if not file_path.exists():
         print(f"IMA upload skipped: file not found: {file_path}")
+        update_delivery_report(
+            "ima",
+            {
+                "status": "skipped",
+                "stage": "file_check",
+                "reason": "file_not_found",
+                "file_path": str(file_path),
+            },
+        )
+        append_delivery_event("ima.upload", "skipped", reason="file_not_found", file_path=str(file_path))
         return
 
     file_size = file_path.stat().st_size
     upload_name = _file_name(file_path, title_prefix=title_prefix)
     file_ext = file_path.suffix.lstrip(".").lower() or "md"
     content_type = _mime_type(file_path)
+    update_delivery_report(
+        "ima",
+        {
+            "status": "started",
+            "stage": "check_repeated_names",
+            "file_path": str(file_path),
+            "upload_name": upload_name,
+            "file_size": file_size,
+            "content_type": content_type,
+            "knowledge_base_id": knowledge_base_id,
+            "folder_id": folder_id,
+        },
+    )
+    append_delivery_event(
+        "ima.upload",
+        "started",
+        file_path=str(file_path),
+        upload_name=upload_name,
+        file_size=file_size,
+    )
 
     repeated_payload = {
         "knowledge_base_id": knowledge_base_id,
@@ -208,8 +248,28 @@ def upload_file(
         repeated_payload["folder_id"] = folder_id
     try:
         repeated = _post_ima("check_repeated_names", repeated_payload, client_id, api_key)
+        update_delivery_report(
+            "ima",
+            {
+                "stage": "create_media",
+                "check_repeated_names": {
+                    "status": "success",
+                    "response_preview": json.dumps(repeated, ensure_ascii=False)[:500],
+                },
+            },
+        )
         print(f"IMA repeated-name check completed: {json.dumps(repeated, ensure_ascii=False)[:500]}")
     except Exception as exc:
+        update_delivery_report(
+            "ima",
+            {
+                "stage": "create_media",
+                "check_repeated_names": {
+                    "status": "skipped_or_failed",
+                    "error": str(exc),
+                },
+            },
+        )
         print(f"IMA repeated-name check skipped: {exc}")
 
     create_payload = {
@@ -224,9 +284,35 @@ def upload_file(
 
     create_response = _post_ima("create_media", create_payload, client_id, api_key)
     media_id, credential = _extract_media_response(create_response)
+    update_delivery_report(
+        "ima",
+        {
+            "status": "in_progress",
+            "stage": "cos_upload",
+            "media_id": media_id,
+            "cos_key": credential.get("cos_key", ""),
+            "bucket_name": credential.get("bucket_name", ""),
+            "region": credential.get("region", ""),
+        },
+    )
+    append_delivery_event(
+        "ima.create_media",
+        "success",
+        media_id=media_id,
+        cos_key=credential.get("cos_key", ""),
+    )
     print(f"IMA media created: media_id={media_id}, file={upload_name}, size={file_size}")
 
     _put_cos(file_path, credential, content_type)
+    update_delivery_report(
+        "ima",
+        {
+            "status": "in_progress",
+            "stage": "add_knowledge",
+            "cos_upload": {"status": "success"},
+        },
+    )
+    append_delivery_event("ima.cos_upload", "success", cos_key=credential.get("cos_key", ""))
     print("IMA COS upload completed")
 
     add_payload = {
@@ -244,6 +330,29 @@ def upload_file(
         add_payload["folder_id"] = folder_id
 
     add_response = _post_ima("add_knowledge", add_payload, client_id, api_key)
+    update_delivery_report(
+        "ima",
+        {
+            "status": "success",
+            "stage": "completed",
+            "media_id": media_id,
+            "upload_name": upload_name,
+            "file_size": file_size,
+            "knowledge_base_id": knowledge_base_id,
+            "folder_id": folder_id,
+            "cos_key": credential["cos_key"],
+            "add_knowledge": {
+                "status": "success",
+                "response_preview": json.dumps(add_response, ensure_ascii=False)[:500],
+            },
+        },
+    )
+    append_delivery_event(
+        "ima.add_knowledge",
+        "success",
+        media_id=media_id,
+        upload_name=upload_name,
+    )
     print(f"IMA add_knowledge completed: {json.dumps(add_response, ensure_ascii=False)[:500]}")
 
 
@@ -260,17 +369,37 @@ def main() -> int:
 
     if not client_id or not api_key:
         print("IMA upload skipped: set IMA_CLIENT_ID and IMA_API_KEY secrets to enable upload")
+        update_delivery_report(
+            "ima",
+            {
+                "status": "skipped",
+                "stage": "auth",
+                "reason": "missing_client_id_or_api_key",
+            },
+        )
+        append_delivery_event("ima.upload", "skipped", reason="missing_client_id_or_api_key")
         return 0
 
-    upload_file(
-        Path(args.file),
-        client_id=client_id,
-        api_key=api_key,
-        knowledge_base_id=knowledge_base_id,
-        folder_id=folder_id,
-        title_prefix=args.title_prefix,
-    )
-    return 0
+    try:
+        upload_file(
+            Path(args.file),
+            client_id=client_id,
+            api_key=api_key,
+            knowledge_base_id=knowledge_base_id,
+            folder_id=folder_id,
+            title_prefix=args.title_prefix,
+        )
+        return 0
+    except Exception as exc:
+        update_delivery_report(
+            "ima",
+            {
+                "status": "failed",
+                "error": str(exc),
+            },
+        )
+        append_delivery_event("ima.upload", "failed", error=str(exc))
+        raise
 
 
 if __name__ == "__main__":

@@ -31,6 +31,10 @@ import requests
 
 from .batch import add_batch_headers, get_max_batch_header_size
 from .formatters import convert_markdown_to_mrkdwn, strip_markdown
+from trendradar.utils.delivery_audit import (
+    append_delivery_event,
+    update_channel_report,
+)
 
 
 def _render_ai_analysis(ai_analysis: Any, channel: str) -> str:
@@ -83,10 +87,44 @@ def _save_notification_preview(
         latest_file = latest_dir / f"{channel}.md"
         history_file.write_text(header + content, encoding="utf-8")
         latest_file.write_text(header + content, encoding="utf-8")
+        total_bytes = sum(len(batch.encode("utf-8")) for batch in batches)
+        update_channel_report(
+            channel,
+            {
+                "preview": {
+                    "status": "saved",
+                    "report_type": report_type,
+                    "batch_count": len(batches),
+                    "total_bytes": total_bytes,
+                    "history_path": str(history_file),
+                    "latest_path": str(latest_file),
+                    "generated_at": now.isoformat(),
+                }
+            },
+        )
+        append_delivery_event(
+            f"{channel}.preview",
+            "saved",
+            report_type=report_type,
+            batch_count=len(batches),
+            total_bytes=total_bytes,
+            latest_path=str(latest_file),
+        )
         print(f"{channel} 推送正文已保存: {history_file}")
         print(f"{channel} 最新推送正文已更新: {latest_file}")
         return history_file
     except Exception as exc:
+        update_channel_report(
+            channel,
+            {
+                "preview": {
+                    "status": "failed",
+                    "report_type": report_type,
+                    "error": str(exc),
+                }
+            },
+        )
+        append_delivery_event(f"{channel}.preview", "failed", error=str(exc))
         print(f"{channel} 推送正文保存失败: {exc}")
         return None
 
@@ -204,6 +242,22 @@ def send_to_feishu(
     _save_notification_preview("feishu", report_type, batches, get_time_func)
 
     print(f"{log_prefix}消息分为 {len(batches)} 批次发送 [{report_type}]")
+    update_channel_report(
+        "feishu",
+        {
+            "send": {
+                "status": "started",
+                "report_type": report_type,
+                "batch_count": len(batches),
+            }
+        },
+    )
+    append_delivery_event(
+        "feishu.send",
+        "started",
+        report_type=report_type,
+        batch_count=len(batches),
+    )
 
     # 逐批发送
     for i, batch_content in enumerate(batches, 1):
@@ -248,20 +302,92 @@ def send_to_feishu(
                         time.sleep(batch_interval)
                 else:
                     error_msg = result.get("msg") or result.get("StatusMessage", "未知错误")
+                    update_channel_report(
+                        "feishu",
+                        {
+                            "send": {
+                                "status": "failed",
+                                "failed_batch": i,
+                                "batch_count": len(batches),
+                                "error": error_msg,
+                                "response": result,
+                            }
+                        },
+                    )
+                    append_delivery_event(
+                        "feishu.send",
+                        "failed",
+                        failed_batch=i,
+                        batch_count=len(batches),
+                        error=error_msg,
+                    )
                     print(
                         f"{log_prefix}第 {i}/{len(batches)} 批次发送失败 [{report_type}]，错误：{error_msg}"
                     )
                     return False
             else:
+                update_channel_report(
+                    "feishu",
+                    {
+                        "send": {
+                            "status": "failed",
+                            "failed_batch": i,
+                            "batch_count": len(batches),
+                            "http_status": response.status_code,
+                            "response_text": response.text[:500],
+                        }
+                    },
+                )
+                append_delivery_event(
+                    "feishu.send",
+                    "failed",
+                    failed_batch=i,
+                    batch_count=len(batches),
+                    http_status=response.status_code,
+                )
                 print(
                     f"{log_prefix}第 {i}/{len(batches)} 批次发送失败 [{report_type}]，状态码：{response.status_code}"
                 )
                 return False
         except Exception as e:
+            update_channel_report(
+                "feishu",
+                {
+                    "send": {
+                        "status": "failed",
+                        "failed_batch": i,
+                        "batch_count": len(batches),
+                        "error": str(e),
+                    }
+                },
+            )
+            append_delivery_event(
+                "feishu.send",
+                "failed",
+                failed_batch=i,
+                batch_count=len(batches),
+                error=str(e),
+            )
             print(f"{log_prefix}第 {i}/{len(batches)} 批次发送出错 [{report_type}]：{e}")
             return False
 
     print(f"{log_prefix}所有 {len(batches)} 批次发送完成 [{report_type}]")
+    update_channel_report(
+        "feishu",
+        {
+            "send": {
+                "status": "success",
+                "report_type": report_type,
+                "batch_count": len(batches),
+            }
+        },
+    )
+    append_delivery_event(
+        "feishu.send",
+        "success",
+        report_type=report_type,
+        batch_count=len(batches),
+    )
 
     return True
 
